@@ -11,6 +11,8 @@ CONFIG_PATH="/etc/mihomo-oneclick/config.yaml"
 CONFIG_DIR="/etc/mihomo-oneclick"
 STATE_DIR="/var/lib/mihomo-oneclick"
 MARKER="$STATE_DIR/.managed-by-mihomo-oneclick"
+KERNEL_DIR="$SCRIPT_DIR/kernels"
+KERNEL_VERSION_FILE="$KERNEL_DIR/VERSION"
 APPLY_STARTED=0
 COMMITTED=0
 MODE="install"
@@ -82,23 +84,29 @@ chmod 600 "$SUBSCRIPTION_FILE"
 python3 "$HELPER" validate-subscription "$SUBSCRIPTION_FILE" || fail "订阅配置无效。"
 
 case "$(uname -m)" in
-    x86_64|amd64) MIHOMO_ARCH="amd64"; YQ_ARCH="amd64" ;;
-    aarch64|arm64) MIHOMO_ARCH="arm64"; YQ_ARCH="arm64" ;;
-    armv7l|armv7*) MIHOMO_ARCH="armv7"; YQ_ARCH="arm" ;;
-    i386|i686) MIHOMO_ARCH="386"; YQ_ARCH="386" ;;
+    x86_64|amd64) MIHOMO_ASSET="mihomo-linux-amd64-compatible"; YQ_ARCH="amd64" ;;
+    aarch64|arm64) MIHOMO_ASSET="mihomo-linux-arm64"; YQ_ARCH="arm64" ;;
+    armv7l|armv7*) MIHOMO_ASSET="mihomo-linux-armv7"; YQ_ARCH="arm" ;;
+    i386|i686) MIHOMO_ASSET="mihomo-linux-386"; YQ_ARCH="386" ;;
     *) fail "不支持的 CPU 架构：$(uname -m)" ;;
 esac
+[[ -f "$KERNEL_VERSION_FILE" && -f "$KERNEL_DIR/SHA256SUMS" ]] || fail "仓库中缺少 Mihomo 内核文件或校验清单。"
+KERNEL_VERSION="$(tr -d '\r\n' < "$KERNEL_VERSION_FILE")"
+[[ "$KERNEL_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "仓库内 Mihomo 版本号格式无效。"
+KERNEL_FILE="$MIHOMO_ASSET-$KERNEL_VERSION.gz"
+BUNDLED_KERNEL="$KERNEL_DIR/$KERNEL_FILE"
+[[ -f "$BUNDLED_KERNEL" ]] || fail "仓库中没有适配当前架构的 Mihomo 内核：$KERNEL_FILE"
+KERNEL_SHA="$(awk -v name="$KERNEL_FILE" '$2 == name { print $1; count++ } END { if (count != 1) exit 1 }' "$KERNEL_DIR/SHA256SUMS")" || fail "SHA-256 清单中没有唯一的当前架构内核记录。"
+[[ "$KERNEL_SHA" =~ ^[0-9a-fA-F]{64}$ ]] || fail "内核 SHA-256 清单格式无效。"
 
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mihomo-oneclick.XXXXXXXX")"
 chmod 700 "$TMP_DIR"
 PROFILE="$TMP_DIR/subscription.yaml"
 PROFILE_JSON="$TMP_DIR/profile.json"
 CANDIDATE="$TMP_DIR/config.yaml"
-MIHOMO_GZ="$TMP_DIR/mihomo.gz"
 MIHOMO_BIN="$TMP_DIR/mihomo"
 YQ_BIN="$TMP_DIR/yq"
 YQ_META="$TMP_DIR/yq-release.json"
-MIHOMO_META="$TMP_DIR/mihomo-release.json"
 RUNTIME_DIR="$TMP_DIR/runtime"
 mkdir -m 700 "$RUNTIME_DIR"
 
@@ -144,17 +152,13 @@ verify_download() {
     printf '%s  %s\n' "$expected" "$path" | sha256sum --check --status - || fail "下载包 SHA-256 校验失败。"
 }
 
-say "正在从官方发布源准备 Mihomo 和 YAML 解析工具……"
-MIHOMO_ASSET_INFO="$(fetch_release_asset "MetaCubeX/mihomo" "$MIHOMO_ARCH" "$MIHOMO_META")" || fail "Mihomo 官方包准备失败。"
-IFS=$'\t' read -r MIHOMO_URL MIHOMO_SHA <<< "$MIHOMO_ASSET_INFO"
-if ! python3 "$HELPER" download "$MIHOMO_URL" "$MIHOMO_GZ" 104857600 binary >/dev/null 2>&1; then
-    fail "Mihomo 官方包下载失败。"
-fi
-verify_download "$MIHOMO_GZ" "$MIHOMO_SHA"
-gzip -t "$MIHOMO_GZ" >/dev/null 2>&1 || fail "Mihomo 下载包格式无效。"
-gzip -dc "$MIHOMO_GZ" > "$MIHOMO_BIN" || fail "无法解压 Mihomo。"
+say "正在校验仓库内的 Mihomo $KERNEL_VERSION（$KERNEL_FILE）……"
+printf '%s  %s\n' "$KERNEL_SHA" "$BUNDLED_KERNEL" | sha256sum --check --status - || fail "仓库内 Mihomo 内核 SHA-256 校验失败。"
+gzip -t "$BUNDLED_KERNEL" >/dev/null 2>&1 || fail "仓库内 Mihomo 内核压缩包无效。"
+gzip -dc "$BUNDLED_KERNEL" > "$MIHOMO_BIN" || fail "无法解压仓库内 Mihomo 内核。"
 chmod 700 "$MIHOMO_BIN"
 
+say "正在从官方发布源准备 YAML 解析工具……"
 YQ_ASSET_INFO="$(fetch_release_asset "mikefarah/yq" "$YQ_ARCH" "$YQ_META")" || fail "YAML 解析工具准备失败。"
 IFS=$'\t' read -r YQ_URL YQ_SHA <<< "$YQ_ASSET_INFO"
 if ! python3 "$HELPER" download "$YQ_URL" "$YQ_BIN" 104857600 binary >/dev/null 2>&1; then

@@ -104,17 +104,7 @@ def release_asset(metadata_path: str, repository: str, platform: str) -> None:
     if not isinstance(tag, str) or not isinstance(assets, list):
         fail("官方发布信息格式异常。")
 
-    if repository == "MetaCubeX/mihomo":
-        if platform == "amd64":
-            expected_names = [
-                f"mihomo-linux-amd64-compatible-{tag}.gz",
-                f"mihomo-linux-amd64-v1-{tag}.gz",
-            ]
-        elif platform in {"arm64", "armv7", "386"}:
-            expected_names = [f"mihomo-linux-{platform}-{tag}.gz"]
-        else:
-            fail("此 CPU 架构没有对应的 Mihomo 官方包。")
-    elif repository == "mikefarah/yq":
+    if repository == "mikefarah/yq":
         if platform not in {"amd64", "arm64", "arm", "386"}:
             fail("此 CPU 架构没有对应的 YAML 解析工具。")
         expected_names = [f"yq_linux_{platform}"]
