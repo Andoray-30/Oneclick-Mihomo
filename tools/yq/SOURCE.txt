@@ -1,0 +1,4 @@
+Project: https://github.com/mikefarah/yq
+Release: https://github.com/mikefarah/yq/releases/tag/v4.54.1
+Source: https://github.com/mikefarah/yq/tree/v4.54.1
+Archive digests are taken from the official GitHub release metadata.

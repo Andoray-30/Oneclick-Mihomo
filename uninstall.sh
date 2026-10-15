@@ -19,6 +19,7 @@ command -v systemctl >/dev/null 2>&1 || fail "当前系统未提供 systemd。"
 
 printf '%s\n' "将停止并移除 $SERVICE_NAME、$BIN_PATH、$CONFIG_DIR 和 $STATE_DIR。"
 printf '%s\n' "外部订阅地址文件不会删除。"
+printf '%s\n' "Ubuntu 软件源设置会保留；如需恢复，请运行 sudo ./restore-ubuntu-sources.sh。"
 read -r -p "确认移除请输入 REMOVE：" CONFIRM
 [[ "$CONFIRM" == "REMOVE" ]] || fail "用户取消。"
 

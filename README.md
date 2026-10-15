@@ -1,6 +1,6 @@
 # Mihomo 一键部署
 
-在使用 systemd 的 Linux 主机上安装 Mihomo，用所选节点代理本机流量。代理规则取自订阅配置。Mihomo 内核已随仓库提供，安装时不会下载内核。
+在使用 systemd 的 Linux 主机上安装 Mihomo，以规则模式代理本机流量。Mihomo 内核和 `yq` 配置解析工具均已随仓库提供，安装时不会单独下载它们。
 
 ## 使用
 
@@ -11,38 +11,43 @@
    cd Oneclick-Mihomo
    ```
 
-2. 首次运行安装器：
+2. 首次运行安装器，按提示在工作区外创建订阅地址文件：
 
    ```bash
    sudo ./install.sh
    ```
 
-   安装器会创建订阅地址文件：`~/.config/mihomo-oneclick/subscription_url.txt`。在文件中写入一条 HTTPS 格式的 Mihomo/Clash YAML 订阅地址。
+   在 `~/.config/mihomo-oneclick/subscription_url.txt` 中写入一条 HTTPS 订阅地址。
 
-3. 再次运行 `sudo ./install.sh`，从终端显示的节点列表中输入编号。检查通过后，输入 `INSTALL` 确认部署。
+3. 再次运行 `sudo ./install.sh`，选择终端列出的节点。检查通过后输入 `INSTALL` 完成部署。
 
-部署完成后，Mihomo 以 `rule` 模式运行，并通过 TUN 自动接管本机流量。每个域名是直连还是代理，由订阅里的规则决定。
+订阅必须返回 Mihomo/Clash YAML，且包含顶层 `proxies:` 节点列表。Base64 包装的 YAML 会自动解码；只返回 `ss://` 等节点链接、网页错误页或仅含 `proxy-providers` 的订阅暂不支持。安装器会提示实际检测到的响应类型，不会把订阅内容写入日志。
 
-## 更换订阅
+再次运行安装器会重新拉取订阅，供更换上游或节点；已部署后的运行不会重复初始化 APT 镜像源。
 
-编辑 `~/.config/mihomo-oneclick/subscription_url.txt`，替换为新的 HTTPS 地址，然后再次运行 `sudo ./install.sh`，选择节点并输入 `INSTALL`。安装器会更新订阅配置，并继续使用仓库内置的内核版本。
+## Ubuntu 镜像源初始化
 
-真实订阅地址保存在工作区外，避免把令牌提交到仓库。部署后的配置位于 `/etc/mihomo-oneclick/config.yaml`。
+首次部署时，Ubuntu 会先备份软件源，再将发行版对应的软件源切换到阿里云，安全更新仍使用 `security.ubuntu.com`，随后执行 `apt clean` 和 `apt update`。初始化完成后会记录 `count=1`，后续运行跳过这些步骤。其他 Linux 发行版不会修改软件源。
 
-## 卸载
-
-运行：
+原软件源备份位于 `/var/backups/mihomo-oneclick/apt-sources/`。要恢复，运行：
 
 ```bash
-sudo ./uninstall.sh
+sudo ./restore-ubuntu-sources.sh
+sudo apt update
 ```
 
-输入 `REMOVE` 后，安装器会停止并移除本程序的服务、内核、配置和运行数据。外部订阅地址文件会保留。
+恢复脚本会要求输入 `RESTORE`。卸载 Mihomo 不会自动改回系统软件源。
+
+## 更换订阅和卸载
+
+更换订阅时编辑 `~/.config/mihomo-oneclick/subscription_url.txt`，再运行安装器选择节点并确认 `INSTALL`。真实订阅地址不应提交到仓库。
+
+卸载运行 `sudo ./uninstall.sh`，输入 `REMOVE`。这会移除本程序的服务、内核、配置和运行数据，但保留外部订阅地址及 Ubuntu 软件源初始化记录。
 
 ## 系统要求
 
 - 使用 systemd 的 Linux；支持 x86_64、ARM64、ARMv7 和 32 位 x86。
-- Python 3、gzip、sha256sum，以及 root 或 sudo 权限。
-- 可以访问 GitHub（获取 YAML 解析工具）和订阅地址。
+- Python 3、gzip、tar、sha256sum，以及 root 或 sudo 权限。
+- 需要访问订阅地址；首次获取仓库仍需能访问 GitHub。
 
-仓库内置 Mihomo `v1.19.32` 的 x86_64、ARM64、ARMv7 和 32 位 x86 内核，文件、SHA-256 清单及许可证位于 `kernels/`。对应的[官方发布](https://github.com/MetaCubeX/mihomo/releases/tag/v1.19.32)和[源代码](https://github.com/MetaCubeX/mihomo/tree/v1.19.32)也可查看。启用 TUN 会改变本机路由和 DNS；仅在确认后才会部署。配置检查失败或订阅格式不受支持时，安装器会在修改系统前停止。
+Mihomo `v1.19.32` 位于 `kernels/`，`yq v4.54.1` 位于 `tools/yq/`，均带 SHA-256 清单和许可证。启用 TUN 会调整本机路由与 DNS；配置检查通过且用户输入 `INSTALL` 后才会部署。

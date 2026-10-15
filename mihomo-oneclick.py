@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
+import re
 import sys
 import urllib.request
 from pathlib import Path
@@ -38,20 +41,25 @@ def subscription_url(path: str) -> str:
     return value
 
 
-def download_file(url: str, destination: str, max_bytes: int, accept_github: bool = False) -> None:
+def download_file(url: str, destination: str, max_bytes: int) -> None:
     if not url.startswith("https://") or max_bytes <= 0:
         fail("下载参数无效。")
     headers = {"User-Agent": "mihomo-oneclick-installer"}
-    if accept_github:
-        headers["Accept"] = "application/vnd.github+json"
     request = urllib.request.Request(url, headers=headers)
     path = Path(destination)
     try:
         with urllib.request.urlopen(request, timeout=180) as response:
             content_length = response.headers.get("Content-Length")
-            if content_length and int(content_length) > max_bytes:
+            try:
+                expected_bytes = int(content_length) if content_length else 0
+            except ValueError:
+                expected_bytes = 0
+            if expected_bytes > max_bytes:
                 fail("下载内容超过大小限制。")
+            content_type = response.headers.get_content_type()
+            print(f"订阅响应类型：{content_type}", file=sys.stderr, flush=True)
             total = 0
+            last_report = 0
             with path.open("wb") as output:
                 while True:
                     block = response.read(min(1024 * 1024, max_bytes - total + 1))
@@ -61,6 +69,15 @@ def download_file(url: str, destination: str, max_bytes: int, accept_github: boo
                     if total > max_bytes:
                         fail("下载内容超过大小限制。")
                     output.write(block)
+                    if total - last_report >= 1024 * 1024:
+                        if expected_bytes:
+                            progress = min(100, total * 100 // expected_bytes)
+                            message = f"订阅下载进度：{progress}%（{total // (1024 * 1024)} MiB）"
+                        else:
+                            message = f"订阅已接收：{total // (1024 * 1024)} MiB"
+                        print(message, file=sys.stderr, flush=True)
+                        last_report = total
+            print(f"订阅下载完成：{total} 字节", file=sys.stderr, flush=True)
     except SystemExit:
         try:
             path.unlink()
@@ -76,13 +93,7 @@ def download_file(url: str, destination: str, max_bytes: int, accept_github: boo
 
 
 def download_command(argv: list[str]) -> None:
-    if len(argv) == 6 and argv[1] == "download":
-        try:
-            max_bytes = int(argv[4])
-        except ValueError:
-            fail("下载大小限制无效。")
-        download_file(argv[2], argv[3], max_bytes, accept_github=argv[5] == "github")
-    elif len(argv) == 5 and argv[1] == "download-subscription":
+    if len(argv) == 5 and argv[1] == "download-subscription":
         try:
             max_bytes = int(argv[4])
         except ValueError:
@@ -94,55 +105,68 @@ def download_command(argv: list[str]) -> None:
         fail("内部下载参数无效。")
 
 
-def release_asset(metadata_path: str, repository: str, platform: str) -> None:
-    metadata = read_json(metadata_path)
-    if not isinstance(metadata, dict):
-        fail("无法读取官方发布信息。")
+def looks_like_mihomo_profile(text: str) -> bool:
+    if re.search(r"(?m)^[\"']?(?:proxies|proxy-providers)[\"']?\s*:", text):
+        return True
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(value, dict) and ("proxies" in value or "proxy-providers" in value)
 
-    tag = metadata.get("tag_name")
-    assets = metadata.get("assets")
-    if not isinstance(tag, str) or not isinstance(assets, list):
-        fail("官方发布信息格式异常。")
 
-    if repository == "mikefarah/yq":
-        if platform not in {"amd64", "arm64", "arm", "386"}:
-            fail("此 CPU 架构没有对应的 YAML 解析工具。")
-        expected_names = [f"yq_linux_{platform}"]
-    else:
-        fail("不支持的官方发布仓库。")
+def normalize_subscription(source_path: str, destination_path: str) -> None:
+    try:
+        raw = Path(source_path).read_bytes()
+    except OSError:
+        fail("下载的订阅配置无法读取。")
+    if raw.startswith(b"\xef\xbb\xbf"):
+        raw = raw[3:]
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        fail("订阅响应不是 UTF-8 文本；请确认订阅服务提供 Mihomo/Clash YAML 格式。")
 
-    selected = None
-    for expected in expected_names:
-        selected = next(
-            (asset for asset in assets if isinstance(asset, dict) and asset.get("name") == expected),
-            None,
-        )
-        if selected is not None:
-            break
+    if not looks_like_mihomo_profile(text):
+        compact = re.sub(r"\s+", "", text)
+        if compact and re.fullmatch(r"[A-Za-z0-9_+/=-]+", compact):
+            try:
+                padding = "=" * ((-len(compact)) % 4)
+                decoded = base64.b64decode(compact + padding, altchars=b"-_", validate=True).decode("utf-8")
+            except (binascii.Error, ValueError, UnicodeDecodeError):
+                decoded = ""
+            if decoded and looks_like_mihomo_profile(decoded):
+                text = decoded
+                print("检测到 Base64 包装的 Mihomo/Clash YAML，已自动解码。")
 
-    if selected is None:
-        fail("官方最新版本中找不到适合此系统的包。")
-
-    url = selected.get("browser_download_url")
-    digest = selected.get("digest")
-    required_prefix = f"https://github.com/{repository}/releases/download/"
-    if (
-        not isinstance(url, str)
-        or not url.startswith(required_prefix)
-        or not isinstance(digest, str)
-        or not digest.startswith("sha256:")
-    ):
-        fail("官方发布缺少可验证的 SHA-256 信息，已停止下载。")
-
-    print(f"{url}\t{digest[len('sha256:'):]}")
+    try:
+        Path(destination_path).write_text(text, encoding="utf-8")
+    except OSError:
+        fail("临时订阅配置无法写入。")
 
 
 def profile_nodes(path: str) -> list[dict[str, Any]]:
     config = read_json(path)
-    if not isinstance(config, dict) or not isinstance(config.get("proxies"), list):
-        fail("订阅不是包含 proxies 节点列表的 Mihomo/Clash YAML 配置。")
+    if not isinstance(config, dict):
+        if isinstance(config, str):
+            if config.lstrip().lower().startswith(("<!doctype html", "<html")):
+                fail("订阅链接返回了网页内容，常见于登录页或错误页；请检查订阅权限和返回格式。")
+            fail("订阅链接返回的是文本而非配置对象；常见原因是协议节点列表或 Base64 节点订阅。请改用 Mihomo/Clash YAML 订阅。")
+        fail("订阅 YAML 的根节点不是配置对象；请使用 Mihomo/Clash YAML 订阅。")
+
+    if "proxies" not in config:
+        if "proxy-providers" in config:
+            fail("订阅只包含 proxy-providers，没有可直接选择的 proxies 节点列表；请使用包含 proxies 列表的 Mihomo/Clash 配置。")
+        safe_keys = [key for key in config if isinstance(key, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,40}", key)]
+        summary = "、".join(safe_keys[:12])
+        detail = f"（检测到字段：{summary}）" if summary else ""
+        fail(f"订阅内容可解析，但没有顶层 proxies 节点列表{detail}；请确认订阅输出格式为 Mihomo/Clash YAML。")
+    if not isinstance(config["proxies"], list):
+        fail("订阅存在 proxies 字段，但它不是节点列表；请检查订阅转换格式。")
 
     nodes = config["proxies"]
+    if not nodes:
+        fail("订阅中的 proxies 列表为空；请检查订阅套餐或转换格式。")
     names: list[dict[str, Any]] = []
     seen: set[str] = set()
     for node in nodes:
@@ -286,10 +310,10 @@ def configure_profile(path: str, index_text: str) -> None:
 
 
 def main(argv: list[str]) -> None:
-    if len(argv) >= 2 and argv[1] in {"download", "download-subscription", "validate-subscription"}:
+    if len(argv) >= 2 and argv[1] in {"download-subscription", "validate-subscription"}:
         download_command(argv)
-    elif len(argv) >= 2 and argv[1] == "release-asset" and len(argv) == 5:
-        release_asset(argv[2], argv[3], argv[4])
+    elif len(argv) == 4 and argv[1] == "normalize-subscription":
+        normalize_subscription(argv[2], argv[3])
     elif len(argv) == 3 and argv[1] == "list-nodes":
         list_nodes(argv[2])
     elif len(argv) == 4 and argv[1] == "configure":

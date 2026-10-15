@@ -13,12 +13,149 @@ STATE_DIR="/var/lib/mihomo-oneclick"
 MARKER="$STATE_DIR/.managed-by-mihomo-oneclick"
 KERNEL_DIR="$SCRIPT_DIR/kernels"
 KERNEL_VERSION_FILE="$KERNEL_DIR/VERSION"
+YQ_DIR="$SCRIPT_DIR/tools/yq"
+YQ_VERSION_FILE="$YQ_DIR/VERSION"
+INIT_STATE_DIR="/var/lib/mihomo-oneclick-bootstrap"
+INIT_STATE_FILE="$INIT_STATE_DIR/initialized-v1"
+APT_BACKUP_DIR="/var/backups/mihomo-oneclick/apt-sources"
+APT_SOURCES_LIST="/etc/apt/sources.list"
+APT_UBUNTU_SOURCES="/etc/apt/sources.list.d/ubuntu.sources"
 APPLY_STARTED=0
 COMMITTED=0
+APT_CHANGE_IN_PROGRESS=0
 MODE="install"
 
 say() { printf '%s\n' "$*"; }
 fail() { say "错误：$*" >&2; exit 1; }
+
+read_os_release_value() {
+    awk -F= -v key="$1" '$1 == key { value = $2; sub(/^"/, "", value); sub(/"$/, "", value); print value; exit }' /etc/os-release
+}
+
+write_init_state() {
+    local status="$1" temporary
+    [[ ! -L "$INIT_STATE_FILE" ]] || fail "初始化状态文件不能是符号链接。"
+    if [[ -e "$INIT_STATE_DIR" ]]; then
+        [[ -d "$INIT_STATE_DIR" && ! -L "$INIT_STATE_DIR" ]] || fail "初始化状态目录路径被占用：$INIT_STATE_DIR"
+    else
+        install -d -m 700 "$INIT_STATE_DIR"
+    fi
+    temporary="$(mktemp "$INIT_STATE_DIR/.state.XXXXXXXX")"
+    printf 'count=1\nstatus=%s\n' "$status" > "$temporary"
+    chmod 600 "$temporary"
+    mv -f -- "$temporary" "$INIT_STATE_FILE"
+}
+
+save_original_apt_sources() {
+    local staged="$TMP_DIR/apt-sources-backup" backup_root="/var/backups/mihomo-oneclick"
+    [[ ! -L "$backup_root" && ! -L "$APT_BACKUP_DIR" && ! -L /etc/apt/sources.list.d ]] || fail "APT 回滚目录或软件源目录不能是符号链接。"
+    [[ ! -L "$APT_SOURCES_LIST" && ! -L "$APT_UBUNTU_SOURCES" ]] || fail "检测到符号链接形式的 Ubuntu 软件源文件；为避免覆盖其他文件，已停止。"
+    if [[ -f "$APT_BACKUP_DIR/.saved" ]]; then
+        return
+    fi
+    [[ ! -e "$APT_BACKUP_DIR" ]] || fail "APT 回滚目录已存在但备份标记缺失：$APT_BACKUP_DIR"
+    if [[ -e "$backup_root" ]]; then
+        [[ -d "$backup_root" ]] || fail "APT 回滚目录路径已被占用：$backup_root"
+    else
+        install -d -m 700 "$backup_root"
+    fi
+    install -d -m 700 "$staged"
+    if [[ -e "$APT_SOURCES_LIST" ]]; then
+        cp -a -- "$APT_SOURCES_LIST" "$staged/sources.list"
+        : > "$staged/had-sources.list"
+    fi
+    if [[ -e "$APT_UBUNTU_SOURCES" ]]; then
+        cp -a -- "$APT_UBUNTU_SOURCES" "$staged/ubuntu.sources"
+        : > "$staged/had-ubuntu.sources"
+    fi
+    : > "$staged/.saved"
+    chmod 600 "$staged/.saved" "$staged/had-sources.list" "$staged/had-ubuntu.sources" 2>/dev/null || true
+    mv -- "$staged" "$APT_BACKUP_DIR"
+    chmod 700 "$APT_BACKUP_DIR"
+}
+
+restore_apt_sources() {
+    [[ -f "$APT_BACKUP_DIR/.saved" ]] || return 0
+    [[ ! -L "$APT_SOURCES_LIST" && ! -L "$APT_UBUNTU_SOURCES" && ! -L /etc/apt/sources.list.d ]] || return 1
+    if [[ -f "$APT_BACKUP_DIR/had-sources.list" ]]; then
+        cp -a -- "$APT_BACKUP_DIR/sources.list" "$APT_SOURCES_LIST"
+    else
+        rm -f -- "$APT_SOURCES_LIST"
+    fi
+    if [[ -f "$APT_BACKUP_DIR/had-ubuntu.sources" ]]; then
+        if [[ ! -d /etc/apt/sources.list.d ]]; then
+            install -d -m 755 /etc/apt/sources.list.d
+        fi
+        cp -a -- "$APT_BACKUP_DIR/ubuntu.sources" "$APT_UBUNTU_SOURCES"
+    else
+        rm -f -- "$APT_UBUNTU_SOURCES"
+    fi
+}
+
+initialize_ubuntu_apt_once() {
+    local os_id os_codename status temporary
+    os_id="$(read_os_release_value ID)"
+    os_codename="$(read_os_release_value VERSION_CODENAME)"
+
+    [[ ! -L "$INIT_STATE_DIR" && ! -L "$INIT_STATE_FILE" ]] || fail "初始化状态路径不能是符号链接。"
+    if [[ -e "$INIT_STATE_FILE" && ! -f "$INIT_STATE_FILE" ]]; then
+        fail "初始化状态文件格式无效。"
+    fi
+    if [[ -f "$INIT_STATE_FILE" ]]; then
+        status="$(awk -F= '$1 == "status" { print $2; exit }' "$INIT_STATE_FILE")"
+        [[ "$(awk -F= '$1 == "count" { print $2; exit }' "$INIT_STATE_FILE")" == 1 ]] || fail "初始化计数状态无效。"
+        case "$status" in
+            complete|skipped-existing-install)
+                say "检测到首次初始化记录（count=1），跳过镜像源切换和 APT 更新。"
+                return
+                ;;
+            *) fail "初始化状态内容无效。" ;;
+        esac
+    fi
+
+    if [[ "$MODE" == "update" ]]; then
+        say "检测到已有 Mihomo 部署，跳过仅首次部署执行的镜像源切换和 APT 更新。"
+        write_init_state skipped-existing-install
+        return
+    fi
+
+    if [[ "$os_id" != "ubuntu" ]]; then
+        say "当前系统不是 Ubuntu，跳过 Ubuntu 专用镜像源初始化。"
+        return
+    fi
+    [[ "$os_codename" =~ ^[a-z][a-z0-9.-]*$ ]] || fail "无法安全识别 Ubuntu 发行代号。"
+    command -v apt >/dev/null 2>&1 || fail "Ubuntu 系统未提供 apt。"
+
+    say "首次初始化：备份当前 Ubuntu 软件源到 $APT_BACKUP_DIR。"
+    save_original_apt_sources
+    APT_CHANGE_IN_PROGRESS=1
+
+    say "正在将 Ubuntu $os_codename 软件源切换到阿里云镜像；安全更新仍使用 security.ubuntu.com。"
+    if [[ -e /etc/apt/sources.list.d ]]; then
+        [[ -d /etc/apt/sources.list.d && ! -L /etc/apt/sources.list.d ]] || fail "APT 软件源目录路径异常。"
+    else
+        install -d -m 755 /etc/apt/sources.list.d
+    fi
+    temporary="$(mktemp /etc/apt/.mihomo-sources.XXXXXXXX)"
+    cat > "$temporary" <<EOF
+deb https://mirrors.aliyun.com/ubuntu/ $os_codename main restricted universe multiverse
+deb https://mirrors.aliyun.com/ubuntu/ $os_codename-updates main restricted universe multiverse
+deb https://mirrors.aliyun.com/ubuntu/ $os_codename-backports main restricted universe multiverse
+deb http://security.ubuntu.com/ubuntu $os_codename-security main restricted universe multiverse
+EOF
+    chmod 644 "$temporary"
+    mv -f -- "$temporary" "$APT_SOURCES_LIST"
+    rm -f -- "$APT_UBUNTU_SOURCES"
+
+    say "正在清理 APT 缓存（apt clean）……"
+    apt clean || fail "apt clean 失败；正在恢复原 Ubuntu 软件源。"
+    say "正在更新软件包索引（apt update）……"
+    apt update || fail "apt update 失败；正在恢复原 Ubuntu 软件源。"
+
+    write_init_state complete
+    APT_CHANGE_IN_PROGRESS=0
+    say "Ubuntu 软件源初始化完成；后续运行将跳过该步骤。"
+}
 
 if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
     CALLER_USER="$SUDO_USER"
@@ -68,6 +205,7 @@ fi
 command -v python3 >/dev/null 2>&1 || fail "缺少 Python 3。"
 command -v sha256sum >/dev/null 2>&1 || fail "缺少 sha256sum。"
 command -v gzip >/dev/null 2>&1 || fail "缺少 gzip。"
+command -v tar >/dev/null 2>&1 || fail "缺少 tar。"
 command -v systemctl >/dev/null 2>&1 || fail "当前系统未提供 systemd。"
 [[ -d /run/systemd/system ]] || fail "systemd 当前未运行；此部署程序面向使用 systemd 的 Linux。"
 
@@ -84,10 +222,10 @@ chmod 600 "$SUBSCRIPTION_FILE"
 python3 "$HELPER" validate-subscription "$SUBSCRIPTION_FILE" || fail "订阅配置无效。"
 
 case "$(uname -m)" in
-    x86_64|amd64) MIHOMO_ASSET="mihomo-linux-amd64-compatible"; YQ_ARCH="amd64" ;;
-    aarch64|arm64) MIHOMO_ASSET="mihomo-linux-arm64"; YQ_ARCH="arm64" ;;
-    armv7l|armv7*) MIHOMO_ASSET="mihomo-linux-armv7"; YQ_ARCH="arm" ;;
-    i386|i686) MIHOMO_ASSET="mihomo-linux-386"; YQ_ARCH="386" ;;
+    x86_64|amd64) MIHOMO_ASSET="mihomo-linux-amd64-compatible"; YQ_ASSET="yq_linux_amd64" ;;
+    aarch64|arm64) MIHOMO_ASSET="mihomo-linux-arm64"; YQ_ASSET="yq_linux_arm64" ;;
+    armv7l|armv7*) MIHOMO_ASSET="mihomo-linux-armv7"; YQ_ASSET="yq_linux_arm" ;;
+    i386|i686) MIHOMO_ASSET="mihomo-linux-386"; YQ_ASSET="yq_linux_386" ;;
     *) fail "不支持的 CPU 架构：$(uname -m)" ;;
 esac
 [[ -f "$KERNEL_VERSION_FILE" && -f "$KERNEL_DIR/SHA256SUMS" ]] || fail "仓库中缺少 Mihomo 内核文件或校验清单。"
@@ -98,20 +236,35 @@ BUNDLED_KERNEL="$KERNEL_DIR/$KERNEL_FILE"
 [[ -f "$BUNDLED_KERNEL" ]] || fail "仓库中没有适配当前架构的 Mihomo 内核：$KERNEL_FILE"
 KERNEL_SHA="$(awk -v name="$KERNEL_FILE" '$2 == name { print $1; count++ } END { if (count != 1) exit 1 }' "$KERNEL_DIR/SHA256SUMS")" || fail "SHA-256 清单中没有唯一的当前架构内核记录。"
 [[ "$KERNEL_SHA" =~ ^[0-9a-fA-F]{64}$ ]] || fail "内核 SHA-256 清单格式无效。"
+[[ -f "$YQ_VERSION_FILE" && -f "$YQ_DIR/SHA256SUMS" ]] || fail "仓库中缺少 yq 工具文件或校验清单。"
+YQ_VERSION="$(tr -d '\r\n' < "$YQ_VERSION_FILE")"
+[[ "$YQ_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "仓库内 yq 版本号格式无效。"
+YQ_FILE="$YQ_ASSET-$YQ_VERSION.tar.gz"
+BUNDLED_YQ="$YQ_DIR/$YQ_FILE"
+[[ -f "$BUNDLED_YQ" ]] || fail "仓库中没有适配当前架构的 yq 工具：$YQ_FILE"
+YQ_SHA="$(awk -v name="$YQ_FILE" '$2 == name { print $1; count++ } END { if (count != 1) exit 1 }' "$YQ_DIR/SHA256SUMS")" || fail "SHA-256 清单中没有唯一的当前架构 yq 记录。"
+[[ "$YQ_SHA" =~ ^[0-9a-fA-F]{64}$ ]] || fail "yq SHA-256 清单格式无效。"
 
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mihomo-oneclick.XXXXXXXX")"
 chmod 700 "$TMP_DIR"
 PROFILE="$TMP_DIR/subscription.yaml"
+PROFILE_NORMALIZED="$TMP_DIR/subscription.normalized.yaml"
 PROFILE_JSON="$TMP_DIR/profile.json"
 CANDIDATE="$TMP_DIR/config.yaml"
 MIHOMO_BIN="$TMP_DIR/mihomo"
 YQ_BIN="$TMP_DIR/yq"
-YQ_META="$TMP_DIR/yq-release.json"
 RUNTIME_DIR="$TMP_DIR/runtime"
 mkdir -m 700 "$RUNTIME_DIR"
 
 cleanup() {
     local status=$?
+    if (( APT_CHANGE_IN_PROGRESS == 1 )); then
+        if restore_apt_sources 2>/dev/null; then
+            say "APT 初始化未完成，已恢复原 Ubuntu 软件源；apt clean 已清理的软件包缓存不会自动恢复。" >&2
+        else
+            say "APT 初始化未完成，自动恢复软件源失败；请从 $APT_BACKUP_DIR 手动恢复。" >&2
+        fi
+    fi
     if (( APPLY_STARTED == 1 && COMMITTED == 0 )); then
         say "部署没有完成，正在回滚本程序刚写入的文件……" >&2
         if [[ "$MODE" == "update" ]]; then
@@ -132,25 +285,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
-fetch_release_asset() {
-    local repository="$1" platform="$2" metadata="$3"
-    local url digest
-    if ! python3 "$HELPER" download "https://api.github.com/repos/$repository/releases/latest" \
-        "$metadata" 10485760 github >/dev/null 2>&1; then
-        fail "无法读取官方发布信息（$repository）。"
-    fi
-    local asset_info
-    asset_info="$(python3 "$HELPER" release-asset "$metadata" "$repository" "$platform")" || fail "官方发布包选择失败。"
-    IFS=$'\t' read -r url digest <<< "$asset_info"
-    [[ "$url" == https://github.com/*/releases/download/* ]] || fail "官方下载地址异常。"
-    [[ "$digest" =~ ^[0-9a-fA-F]{64}$ ]] || fail "官方 SHA-256 信息异常。"
-    printf '%s\t%s\n' "$url" "$digest"
+verify_sha256() {
+    local path="$1" expected="$2"
+    printf '%s  %s\n' "$expected" "$path" | sha256sum --check --status - || fail "SHA-256 校验失败：$path"
 }
 
-verify_download() {
-    local path="$1" expected="$2"
-    printf '%s  %s\n' "$expected" "$path" | sha256sum --check --status - || fail "下载包 SHA-256 校验失败。"
-}
+initialize_ubuntu_apt_once
 
 say "正在校验仓库内的 Mihomo $KERNEL_VERSION（$KERNEL_FILE）……"
 printf '%s  %s\n' "$KERNEL_SHA" "$BUNDLED_KERNEL" | sha256sum --check --status - || fail "仓库内 Mihomo 内核 SHA-256 校验失败。"
@@ -158,26 +298,28 @@ gzip -t "$BUNDLED_KERNEL" >/dev/null 2>&1 || fail "仓库内 Mihomo 内核压缩
 gzip -dc "$BUNDLED_KERNEL" > "$MIHOMO_BIN" || fail "无法解压仓库内 Mihomo 内核。"
 chmod 700 "$MIHOMO_BIN"
 
-say "正在从官方发布源准备 YAML 解析工具……"
-YQ_ASSET_INFO="$(fetch_release_asset "mikefarah/yq" "$YQ_ARCH" "$YQ_META")" || fail "YAML 解析工具准备失败。"
-IFS=$'\t' read -r YQ_URL YQ_SHA <<< "$YQ_ASSET_INFO"
-if ! python3 "$HELPER" download "$YQ_URL" "$YQ_BIN" 104857600 binary >/dev/null 2>&1; then
-    fail "YAML 解析工具下载失败。"
-fi
-verify_download "$YQ_BIN" "$YQ_SHA"
+say "正在校验仓库内的 YAML 解析工具 $YQ_VERSION（$YQ_FILE）……"
+verify_sha256 "$BUNDLED_YQ" "$YQ_SHA"
+tar -tzf "$BUNDLED_YQ" | awk -v expected="./$YQ_ASSET" '$0 == expected { found = 1 } END { exit !found }' || fail "仓库内 yq 压缩包缺少对应架构的程序。"
+tar -xzf "$BUNDLED_YQ" -C "$TMP_DIR" "./$YQ_ASSET" || fail "无法解压仓库内 yq。"
+mv -- "$TMP_DIR/$YQ_ASSET" "$YQ_BIN"
 chmod 700 "$YQ_BIN"
+YQ_ACTUAL_VERSION="$("$YQ_BIN" --version 2>/dev/null)" || fail "仓库内 yq 无法运行。"
+[[ "$YQ_ACTUAL_VERSION" == *"$YQ_VERSION"* ]] || fail "仓库内 yq 版本与版本记录不一致。"
+say "仓库内 yq 已就绪，不会从远端下载。"
 
 say "正在获取订阅配置并读取节点列表……"
-if ! python3 "$HELPER" download-subscription "$SUBSCRIPTION_FILE" "$PROFILE" 52428800 >/dev/null 2>&1; then
+if ! python3 "$HELPER" download-subscription "$SUBSCRIPTION_FILE" "$PROFILE" 52428800; then
     fail "订阅配置下载失败；请检查订阅地址或网络。"
 fi
 [[ -s "$PROFILE" ]] || fail "订阅返回了空文件。"
-if ! "$YQ_BIN" eval -o=json '.' "$PROFILE" > "$PROFILE_JSON" 2>/dev/null; then
-    fail "订阅内容不是可读取的 Mihomo/Clash YAML 配置。"
+say "正在识别订阅编码……"
+python3 "$HELPER" normalize-subscription "$PROFILE" "$PROFILE_NORMALIZED"
+say "正在解析订阅 YAML……"
+if ! "$YQ_BIN" eval -o=json '.' "$PROFILE_NORMALIZED" > "$PROFILE_JSON" 2>/dev/null; then
+    fail "订阅响应无法解析为 YAML；可能是网页错误页、协议节点列表或非 Mihomo/Clash 格式。为保护订阅信息，未输出响应内容。"
 fi
-if ! python3 "$HELPER" list-nodes "$PROFILE_JSON" > "$TMP_DIR/nodes.txt"; then
-    fail "无法从订阅配置提取节点。"
-fi
+python3 "$HELPER" list-nodes "$PROFILE_JSON" > "$TMP_DIR/nodes.txt"
 
 say "\n订阅中的节点："
 while IFS=$'\t' read -r node_index node_name; do
