@@ -44,7 +44,7 @@ def subscription_url(path: str) -> str:
 def download_file(url: str, destination: str, max_bytes: int) -> None:
     if not url.startswith("https://") or max_bytes <= 0:
         fail("下载参数无效。")
-    headers = {"User-Agent": "mihomo-oneclick-installer"}
+    headers = {"User-Agent": "clash-verge/v2.5.8"}
     request = urllib.request.Request(url, headers=headers)
     path = Path(destination)
     try:
