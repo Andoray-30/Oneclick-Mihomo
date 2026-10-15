@@ -48,7 +48,7 @@ def download_file(url: str, destination: str, max_bytes: int) -> None:
     request = urllib.request.Request(url, headers=headers)
     path = Path(destination)
     try:
-        with urllib.request.urlopen(request, timeout=180) as response:
+        with urllib.request.urlopen(request, timeout=30) as response:
             content_length = response.headers.get("Content-Length")
             try:
                 expected_bytes = int(content_length) if content_length else 0
@@ -58,11 +58,13 @@ def download_file(url: str, destination: str, max_bytes: int) -> None:
                 fail("下载内容超过大小限制。")
             content_type = response.headers.get_content_type()
             print(f"订阅响应类型：{content_type}", file=sys.stderr, flush=True)
+            if content_type in {"text/html", "application/xhtml+xml"}:
+                fail("订阅服务器返回了网页（text/html），已停止读取；请检查是否复制了订阅专用地址，以及订阅是否需要登录或授权。")
             total = 0
             last_report = 0
             with path.open("wb") as output:
                 while True:
-                    block = response.read(min(1024 * 1024, max_bytes - total + 1))
+                    block = response.read1(min(1024 * 1024, max_bytes - total + 1))
                     if not block:
                         break
                     total += len(block)
