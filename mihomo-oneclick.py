@@ -7,7 +7,10 @@ import base64
 import binascii
 import json
 import re
+import shutil
+import subprocess
 import sys
+import time
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -41,7 +44,7 @@ def subscription_url(path: str) -> str:
     return value
 
 
-def download_file(url: str, destination: str, max_bytes: int) -> None:
+def _download_file_once(url: str, destination: str, max_bytes: int) -> None:
     if not url.startswith("https://") or max_bytes <= 0:
         fail("下载参数无效。")
     headers = {"User-Agent": "clash-verge/v2.5.8", "Accept": "*/*"}
@@ -66,26 +69,29 @@ def download_file(url: str, destination: str, max_bytes: int) -> None:
             )
             print(f"订阅响应类型：{content_type}", file=sys.stderr, flush=True)
             if content_type in {"text/html", "application/xhtml+xml"}:
-                fail("订阅服务器返回了网页而非 YAML，已停止读取；请对照 Clash Verge 的 User-Agent、更新代理设置和服务端访问限制。")
+                print("服务端标记为 HTML，将下载正文并按实际内容识别配置。", file=sys.stderr, flush=True)
             total = 0
             last_report = 0
+            last_report_time = time.monotonic()
             with path.open("wb") as output:
                 while True:
-                    block = response.read1(min(1024 * 1024, max_bytes - total + 1))
+                    block = response.read1(min(64 * 1024, max_bytes - total + 1))
                     if not block:
                         break
                     total += len(block)
                     if total > max_bytes:
                         fail("下载内容超过大小限制。")
                     output.write(block)
-                    if total - last_report >= 1024 * 1024:
+                    now = time.monotonic()
+                    if last_report == 0 or total - last_report >= 128 * 1024 or now - last_report_time >= 5:
                         if expected_bytes:
                             progress = min(100, total * 100 // expected_bytes)
-                            message = f"订阅下载进度：{progress}%（{total // (1024 * 1024)} MiB）"
+                            message = f"订阅下载进度：{progress}%（{total // 1024} KiB）"
                         else:
-                            message = f"订阅已接收：{total // (1024 * 1024)} MiB"
+                            message = f"订阅已接收：{total // 1024} KiB"
                         print(message, file=sys.stderr, flush=True)
                         last_report = total
+                        last_report_time = now
             print(f"订阅下载完成：{total} 字节", file=sys.stderr, flush=True)
     except SystemExit:
         try:
@@ -98,7 +104,55 @@ def download_file(url: str, destination: str, max_bytes: int) -> None:
             path.unlink()
         except OSError:
             pass
-        fail("HTTPS 下载失败；已隐藏远端地址和响应内容。")
+        raise
+
+
+def _download_file_with_curl(url: str, destination: str, max_bytes: int) -> None:
+    path = Path(destination)
+    print("正在使用 curl 下载订阅（支持 HTTP/2 和压缩响应）……", file=sys.stderr, flush=True)
+    arguments = [
+        "curl", "--location", "--fail", "--compressed",
+        "--connect-timeout", "15", "--max-time", "180",
+        "--max-filesize", str(max_bytes),
+        "--user-agent", "clash-verge/v2.5.8", "--header", "Accept: */*",
+        "--output", str(path),
+        "--write-out", "%{http_code}\\n%{content_type}\\n%{num_redirects}\\n",
+        "--progress-bar" if sys.stderr.isatty() else "--silent",
+        "--show-error", "--config", "-",
+    ]
+    config = 'url = "' + url.replace("\\", "\\\\").replace('"', '\\"') + '"\n'
+    try:
+        result = subprocess.run(arguments, input=config.encode(), stdout=subprocess.PIPE, timeout=195)
+        if result.returncode:
+            raise OSError(f"curl 下载失败（退出码 {result.returncode}）")
+        if path.stat().st_size > max_bytes:
+            fail("下载内容超过大小限制。")
+        metadata = result.stdout.decode(errors="replace").splitlines()
+        if len(metadata) >= 3:
+            print(f"订阅 HTTP 状态：{metadata[0]}；重定向次数：{metadata[2]}", file=sys.stderr, flush=True)
+            print(f"订阅响应类型：{metadata[1]}（以正文解析结果为准）", file=sys.stderr, flush=True)
+        print(f"订阅下载完成：{path.stat().st_size} 字节", file=sys.stderr, flush=True)
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+
+
+def download_file(url: str, destination: str, max_bytes: int) -> None:
+    if not url.startswith("https://") or max_bytes <= 0:
+        fail("下载参数无效。")
+    downloader = _download_file_with_curl if shutil.which("curl") else _download_file_once
+    if downloader is _download_file_once:
+        print("未安装 curl，使用 Python 内置下载器……", file=sys.stderr, flush=True)
+    for attempt in range(1, 4):
+        try:
+            downloader(url, destination, max_bytes)
+            return
+        except Exception as exc:
+            print(f"订阅网络读取失败：{type(exc).__name__}（第 {attempt}/3 次）。", file=sys.stderr, flush=True)
+            if attempt == 3:
+                fail("HTTPS 下载重试后仍失败，请稍后重新运行。")
+            print("正在重新连接订阅服务器……", file=sys.stderr, flush=True)
+            time.sleep(1)
 
 
 def download_command(argv: list[str]) -> None:
@@ -135,6 +189,9 @@ def normalize_subscription(source_path: str, destination_path: str) -> None:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
         fail("订阅响应不是 UTF-8 文本；请确认订阅服务提供 Mihomo/Clash YAML 格式。")
+
+    if re.match(r"\s*(?:<!doctype\s+html\b|<html\b)", text, re.IGNORECASE):
+        fail("订阅正文确实是 HTML 网页，未找到 Mihomo/Clash YAML 配置。")
 
     if not looks_like_mihomo_profile(text):
         compact = re.sub(r"\s+", "", text)

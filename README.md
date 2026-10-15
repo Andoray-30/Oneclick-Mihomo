@@ -21,7 +21,7 @@
 
 3. 再次运行 `sudo ./install.sh`，选择终端列出的节点。检查通过后输入 `INSTALL` 完成部署。
 
-订阅必须返回 Mihomo/Clash YAML，且包含顶层 `proxies:` 节点列表。Base64 包装的 YAML 会自动解码；只返回 `ss://` 等节点链接、网页错误页或仅含 `proxy-providers` 的订阅暂不支持。安装器使用 Clash Verge Rev 默认请求标识，并只记录 HTTP 状态、响应类型等诊断信息；若返回 `text/html`，请检查桌面端自定义请求标识、代理更新设置和服务端访问限制。不会记录订阅地址或正文。
+订阅必须返回 Mihomo/Clash YAML，且包含顶层 `proxies:` 节点列表。安装器按实际正文解析；服务商把 YAML 错标为 `text/html` 时也能正常读取。优先使用系统已有的 curl 下载，支持压缩响应；没有 curl 时使用 Python 下载器。网络失败会自动重试，下载时显示进度。Base64 包装的 YAML 会自动解码；只返回 `ss://` 等节点链接、真正的网页或仅含 `proxy-providers` 的订阅暂不支持。
 
 再次运行安装器会重新拉取订阅，供更换上游或节点；已部署后的运行不会重复初始化 APT 镜像源。
 
@@ -49,5 +49,6 @@ sudo apt update
 - 使用 systemd 的 Linux；支持 x86_64、ARM64、ARMv7 和 32 位 x86。
 - Python 3、gzip、tar、sha256sum，以及 root 或 sudo 权限。
 - 需要访问订阅地址；首次获取仓库仍需能访问 GitHub。
+- 首次内核配置检查可能下载规则引用的 GeoIP/GeoSite 地区数据库。
 
 Mihomo `v1.19.32` 位于 `kernels/`，`yq v4.54.1` 位于 `tools/yq/`，均带 SHA-256 清单和许可证。启用 TUN 会调整本机路由与 DNS；配置检查通过且用户输入 `INSTALL` 后才会部署。

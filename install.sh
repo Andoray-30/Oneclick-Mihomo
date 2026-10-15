@@ -339,8 +339,9 @@ done
 if ! python3 "$HELPER" configure "$PROFILE_JSON" "$NODE_INDEX" > "$CANDIDATE"; then
     fail "无法生成规则模式配置。"
 fi
+say "正在检查 Mihomo 配置；首次检查可能需要下载规则引用的 GeoIP/GeoSite 数据……"
 if ! "$MIHOMO_BIN" -d "$RUNTIME_DIR" -t -f "$CANDIDATE" >/dev/null 2>&1; then
-    fail "Mihomo 配置检查未通过；尚未修改系统。"
+    fail "Mihomo 配置检查未通过；请确认规则引用的 GeoIP/GeoSite 数据可下载，或检查上游配置。"
 fi
 
 if [[ "$MODE" == "update" ]]; then
