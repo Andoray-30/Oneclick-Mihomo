@@ -27,7 +27,7 @@
 
 ## Ubuntu 镜像源初始化
 
-首次部署时，Ubuntu 会先备份软件源，再将发行版对应的软件源切换到阿里云，安全更新仍使用 `security.ubuntu.com`，随后执行 `apt clean` 和 `apt update`。初始化完成后会记录 `count=1`，后续运行跳过这些步骤。其他 Linux 发行版不会修改软件源。
+首次部署时，Ubuntu 会先备份软件源，再将发行版对应的软件源切换到阿里云，安全更新仍使用 `security.ubuntu.com`，随后执行 `apt clean` 和 `apt update`。`apt clean` 会清除本地已下载的软件包缓存；恢复源文件时不会恢复这些缓存。初始化完成后会记录 `count=1`，后续运行跳过这些步骤。其他 Linux 发行版不会修改软件源。
 
 原软件源备份位于 `/var/backups/mihomo-oneclick/apt-sources/`。要恢复，运行：
 
