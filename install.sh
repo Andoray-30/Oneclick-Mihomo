@@ -290,8 +290,6 @@ verify_sha256() {
     printf '%s  %s\n' "$expected" "$path" | sha256sum --check --status - || fail "SHA-256 校验失败：$path"
 }
 
-initialize_ubuntu_apt_once
-
 say "正在校验仓库内的 Mihomo $KERNEL_VERSION（$KERNEL_FILE）……"
 printf '%s  %s\n' "$KERNEL_SHA" "$BUNDLED_KERNEL" | sha256sum --check --status - || fail "仓库内 Mihomo 内核 SHA-256 校验失败。"
 gzip -t "$BUNDLED_KERNEL" >/dev/null 2>&1 || fail "仓库内 Mihomo 内核压缩包无效。"
@@ -307,6 +305,8 @@ chmod 700 "$YQ_BIN"
 YQ_ACTUAL_VERSION="$("$YQ_BIN" --version 2>/dev/null)" || fail "仓库内 yq 无法运行。"
 [[ "$YQ_ACTUAL_VERSION" == *"$YQ_VERSION"* ]] || fail "仓库内 yq 版本与版本记录不一致。"
 say "仓库内 yq 已就绪，不会从远端下载。"
+
+initialize_ubuntu_apt_once
 
 say "正在获取订阅配置并读取节点列表……"
 if ! python3 "$HELPER" download-subscription "$SUBSCRIPTION_FILE" "$PROFILE" 52428800; then
