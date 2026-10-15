@@ -44,7 +44,7 @@ def subscription_url(path: str) -> str:
 def download_file(url: str, destination: str, max_bytes: int) -> None:
     if not url.startswith("https://") or max_bytes <= 0:
         fail("下载参数无效。")
-    headers = {"User-Agent": "clash-verge/v2.5.8"}
+    headers = {"User-Agent": "clash-verge/v2.5.8", "Accept": "*/*"}
     request = urllib.request.Request(url, headers=headers)
     path = Path(destination)
     try:
@@ -57,9 +57,16 @@ def download_file(url: str, destination: str, max_bytes: int) -> None:
             if expected_bytes > max_bytes:
                 fail("下载内容超过大小限制。")
             content_type = response.headers.get_content_type()
+            transfer_encoding = response.headers.get("Transfer-Encoding", "未知")
+            redirected = response.geturl() != url
+            print(
+                f"订阅 HTTP 状态：{response.status}；重定向：{'是' if redirected else '否'}；传输方式：{transfer_encoding}",
+                file=sys.stderr,
+                flush=True,
+            )
             print(f"订阅响应类型：{content_type}", file=sys.stderr, flush=True)
             if content_type in {"text/html", "application/xhtml+xml"}:
-                fail("订阅服务器返回了网页（text/html），已停止读取；请检查是否复制了订阅专用地址，以及订阅是否需要登录或授权。")
+                fail("订阅服务器返回了网页而非 YAML，已停止读取；请对照 Clash Verge 的 User-Agent、更新代理设置和服务端访问限制。")
             total = 0
             last_report = 0
             with path.open("wb") as output:
