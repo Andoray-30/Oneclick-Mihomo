@@ -15,6 +15,8 @@ KERNEL_DIR="$SCRIPT_DIR/kernels"
 KERNEL_VERSION_FILE="$KERNEL_DIR/VERSION"
 YQ_DIR="$SCRIPT_DIR/tools/yq"
 YQ_VERSION_FILE="$YQ_DIR/VERSION"
+DATA_DIR="$SCRIPT_DIR/data"
+GEODATA_FILES=(Country.mmdb GeoSite.dat)
 INIT_STATE_DIR="/var/lib/mihomo-oneclick-bootstrap"
 INIT_STATE_FILE="$INIT_STATE_DIR/initialized-v1"
 APT_BACKUP_DIR="/var/backups/mihomo-oneclick/apt-sources"
@@ -271,6 +273,13 @@ cleanup() {
             install -m 755 "$TMP_DIR/old-mihomo" "$BIN_PATH" 2>/dev/null || true
             install -m 600 "$TMP_DIR/old-config.yaml" "$CONFIG_PATH" 2>/dev/null || true
             install -m 644 "$TMP_DIR/old-service" "$SERVICE_PATH" 2>/dev/null || true
+            for asset in "${GEODATA_FILES[@]}"; do
+                if [[ -f "$TMP_DIR/old-geodata/$asset" ]]; then
+                    install -m 600 "$TMP_DIR/old-geodata/$asset" "$STATE_DIR/$asset" 2>/dev/null || true
+                else
+                    rm -f -- "$STATE_DIR/$asset"
+                fi
+            done
             systemctl daemon-reload >/dev/null 2>&1 || true
             systemctl restart "$SERVICE_NAME" >/dev/null 2>&1 || true
         else
@@ -306,6 +315,17 @@ YQ_ACTUAL_VERSION="$("$YQ_BIN" --version 2>/dev/null)" || fail "仓库内 yq 无
 [[ "$YQ_ACTUAL_VERSION" == *"$YQ_VERSION"* ]] || fail "仓库内 yq 版本与版本记录不一致。"
 say "仓库内 yq 已就绪，不会从远端下载。"
 
+say "正在校验并加载仓库内的 GeoIP/GeoSite 地区库……"
+[[ -f "$DATA_DIR/SHA256SUMS" ]] || fail "仓库中缺少地区库 SHA-256 清单。"
+for asset in "${GEODATA_FILES[@]}"; do
+    [[ -f "$DATA_DIR/$asset" ]] || fail "仓库中缺少地区库：$asset"
+    asset_sha="$(awk -v name="$asset" '$2 == name { print $1; count++ } END { if (count != 1) exit 1 }' "$DATA_DIR/SHA256SUMS")" || fail "地区库校验清单缺少唯一记录：$asset"
+    [[ "$asset_sha" =~ ^[0-9a-fA-F]{64}$ ]] || fail "地区库 SHA-256 清单格式无效：$asset"
+    verify_sha256 "$DATA_DIR/$asset" "$asset_sha"
+    install -m 600 "$DATA_DIR/$asset" "$RUNTIME_DIR/$asset"
+done
+say "本地 GeoIP/GeoSite 地区库已就绪。"
+
 initialize_ubuntu_apt_once
 
 say "正在获取订阅配置并读取节点列表……"
@@ -339,15 +359,21 @@ done
 if ! python3 "$HELPER" configure "$PROFILE_JSON" "$NODE_INDEX" > "$CANDIDATE"; then
     fail "无法生成规则模式配置。"
 fi
-say "正在检查 Mihomo 配置；首次检查可能需要下载规则引用的 GeoIP/GeoSite 数据……"
-if ! "$MIHOMO_BIN" -d "$RUNTIME_DIR" -t -f "$CANDIDATE" >/dev/null 2>&1; then
-    fail "Mihomo 配置检查未通过；请确认规则引用的 GeoIP/GeoSite 数据可下载，或检查上游配置。"
+say "正在使用本地地区库检查 Mihomo 配置……"
+if ! python3 "$HELPER" check-config "$MIHOMO_BIN" "$RUNTIME_DIR" "$CANDIDATE"; then
+    fail "Mihomo 配置检查未通过；请查看上方的内核错误。"
 fi
 
 if [[ "$MODE" == "update" ]]; then
     cp -p -- "$BIN_PATH" "$TMP_DIR/old-mihomo"
     cp -p -- "$CONFIG_PATH" "$TMP_DIR/old-config.yaml"
     cp -p -- "$SERVICE_PATH" "$TMP_DIR/old-service"
+    mkdir -m 700 "$TMP_DIR/old-geodata"
+    for asset in "${GEODATA_FILES[@]}"; do
+        if [[ -f "$STATE_DIR/$asset" ]]; then
+            cp -p -- "$STATE_DIR/$asset" "$TMP_DIR/old-geodata/$asset"
+        fi
+    done
     say "\n检测到本程序此前部署的 Mihomo，将更新内核和配置并重启本程序的服务。"
 else
     say "\n即将安装 Mihomo，并启用本机 TUN 规则代理。"
@@ -365,6 +391,9 @@ if [[ "$MODE" == "install" ]]; then
 fi
 install -m 755 "$MIHOMO_BIN" "$BIN_PATH"
 install -m 600 "$CANDIDATE" "$CONFIG_PATH"
+for asset in "${GEODATA_FILES[@]}"; do
+    install -m 600 "$RUNTIME_DIR/$asset" "$STATE_DIR/$asset"
+done
 cat > "$TMP_DIR/service" <<'UNIT'
 [Unit]
 Description=Mihomo local rule-based proxy (one-click deployment)

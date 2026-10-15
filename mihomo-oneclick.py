@@ -347,6 +347,7 @@ def configure_profile(path: str, index_text: str) -> None:
         rules.append(f"MATCH,{selected_group}")
     config["rules"] = rules
     config["mode"] = "rule"
+    config["geo-auto-update"] = False
 
     config["tun"] = {
         "enable": True,
@@ -375,6 +376,38 @@ def configure_profile(path: str, index_text: str) -> None:
         fail("上游配置中包含无法转换的 YAML 数据。")
 
 
+def check_config(core: str, runtime: str, profile: str) -> None:
+    process = subprocess.Popen([core, "-d", runtime, "-t", "-f", profile], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    start = time.monotonic()
+    timed_out = False
+    try:
+        while True:
+            try:
+                output, _ = process.communicate(timeout=5)
+                break
+            except subprocess.TimeoutExpired:
+                elapsed = int(time.monotonic() - start)
+                print(f"Mihomo 配置检查中，已等待 {elapsed} 秒……", file=sys.stderr, flush=True)
+                if elapsed >= 90:
+                    timed_out = True
+                    process.kill()
+                    output, _ = process.communicate()
+                    break
+    except BaseException:
+        process.kill()
+        process.communicate()
+        raise
+    # Keep kernel diagnostics useful without echoing provider URLs into logs.
+    log = re.sub(r"https?://[^\s\"'<>]+", "[远端地址]", output.decode(errors="replace"))
+    if log:
+        print(log, file=sys.stderr, end="" if log.endswith("\n") else "\n", flush=True)
+    if timed_out:
+        fail("Mihomo 配置检查超过 90 秒，已结束本次检查。")
+    if process.returncode:
+        fail(f"Mihomo 内核配置检查失败，退出码：{process.returncode}。")
+    print("Mihomo 配置检查通过。", file=sys.stderr, flush=True)
+
+
 def main(argv: list[str]) -> None:
     if len(argv) >= 2 and argv[1] in {"download-subscription", "validate-subscription"}:
         download_command(argv)
@@ -384,6 +417,8 @@ def main(argv: list[str]) -> None:
         list_nodes(argv[2])
     elif len(argv) == 4 and argv[1] == "configure":
         configure_profile(argv[2], argv[3])
+    elif len(argv) == 5 and argv[1] == "check-config":
+        check_config(argv[2], argv[3], argv[4])
     else:
         fail("内部调用参数无效。")
 

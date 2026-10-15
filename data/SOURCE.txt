@@ -1,0 +1,15 @@
+Bundled GeoIP (MMDB) and GeoSite data from MetaCubeX/meta-rules-dat.
+Source repository: https://github.com/MetaCubeX/meta-rules-dat
+Pinned release-branch commit: d7fbabb5c7ada92098d967160ef31dc590e5f509
+Release: https://github.com/MetaCubeX/meta-rules-dat/releases/tag/latest
+Retrieved: 2026-10-15
+
+Country.mmdb is the unmodified upstream country.mmdb asset.
+GeoSite.dat is the unmodified upstream geosite.dat asset.
+SHA256SUMS matches the official GitHub release asset digests.
+Repository license: GPL-3.0; see LICENSE.txt.
+Upstream data sources and acknowledgments: UPSTREAM-README.md.
+
+The installer preloads these files during validation and copies them to
+/var/lib/mihomo-oneclick when deployment is confirmed. Automatic GEO database
+updates are disabled; redeploy a newer repository snapshot to update this data.

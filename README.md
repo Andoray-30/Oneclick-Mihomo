@@ -1,6 +1,6 @@
 # Mihomo 一键部署
 
-在使用 systemd 的 Linux 主机上安装 Mihomo，以规则模式代理本机流量。Mihomo 内核和 `yq` 配置解析工具均已随仓库提供，安装时不会单独下载它们。
+在使用 systemd 的 Linux 主机上安装 Mihomo，以规则模式代理本机流量。Mihomo 内核、`yq` 解析工具、GeoIP（Country.mmdb）和 GeoSite 地区库均已随仓库提供。
 
 ## 使用
 
@@ -24,6 +24,8 @@
 订阅必须返回 Mihomo/Clash YAML，且包含顶层 `proxies:` 节点列表。安装器按实际正文解析；服务商把 YAML 错标为 `text/html` 时也能正常读取。优先使用系统已有的 curl 下载，支持压缩响应；没有 curl 时使用 Python 下载器。网络失败会自动重试，下载时显示进度。Base64 包装的 YAML 会自动解码；只返回 `ss://` 等节点链接、真正的网页或仅含 `proxy-providers` 的订阅暂不支持。
 
 再次运行安装器会重新拉取订阅，供更换上游或节点；已部署后的运行不会重复初始化 APT 镜像源。
+
+配置检查预先加载本地地区库，部署后保存到 `/var/lib/mihomo-oneclick`。地区库随仓库版本更新，不自动联网更新；检查过程中每 5 秒显示等待状态，最长等待 90 秒，并显示内核错误。
 
 ## Ubuntu 镜像源初始化
 
@@ -49,6 +51,6 @@ sudo apt update
 - 使用 systemd 的 Linux；支持 x86_64、ARM64、ARMv7 和 32 位 x86。
 - Python 3、gzip、tar、sha256sum，以及 root 或 sudo 权限。
 - 需要访问订阅地址；首次获取仓库仍需能访问 GitHub。
-- 首次内核配置检查可能下载规则引用的 GeoIP/GeoSite 地区数据库。
+- 默认 MMDB 模式使用仓库内的地区库；上游若指定其他 GEO 数据格式或外部 rule-providers，仍需自行提供相应数据或访问上游。
 
 Mihomo `v1.19.32` 位于 `kernels/`，`yq v4.54.1` 位于 `tools/yq/`，均带 SHA-256 清单和许可证。启用 TUN 会调整本机路由与 DNS；配置检查通过且用户输入 `INSTALL` 后才会部署。
